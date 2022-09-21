@@ -21,6 +21,7 @@
 #include <tbb/tbb.h>
 #include <Eigen/Geometry>
 #include <atomic>
+#include <stack>
 
 /*
  * =======================================================================
@@ -32,11 +33,77 @@
  */
 
 NORI_NAMESPACE_BEGIN
+struct OctreeNode {
+public:
+  OctreeNode(const BoundingBox3f& bbox):bbox(bbox) {}
+  virtual ~OctreeNode() {
+    for( auto child : children) {
+      delete child;
+    }
+  }
+  
+  virtual bool is_leaf() const {
+    return false;
+  }
+
+  virtual unsigned int nbTriangles() const {
+    return 0;
+  }
+
+  virtual const Triangle* getTriangles() const {
+    return nullptr;
+  }
+
+public:
+  using NodePtr = OctreeNode*;
+  BoundingBox3f bbox;
+  static const uint32_t triangles_per_leaf = 10;
+  NodePtr children[8] = {nullptr};
+};
+
+struct OctreeLeaf : public OctreeNode {
+  OctreeLeaf(const BoundingBox3f& bbox, const std::vector<Triangle>& triangles): OctreeNode(bbox), size(triangles.size()), triangles(new Triangle[size]) {
+    for(unsigned int k=0; k<size; ++k) {
+      this->triangles[k] = triangles[k];
+    }
+  }
+
+  ~OctreeLeaf() {
+    delete[] triangles;
+  }
+
+  bool is_leaf() const override {
+    return true;
+  }
+
+  unsigned int nbTriangles() const override {
+    return size;
+  }
+
+  const Triangle* getTriangles() const override {
+    return triangles;
+  }
+
+public:
+  unsigned int size;
+  Triangle *triangles;
+};
+
+
+OctreeNode*
+Accel::build(const BoundingBox3f& bbox, const Triangles & triangles){
+  //todo (Part 1): fill in this part to construct the Octree
+  return nullptr;
+}
 
 
 void Accel::addMesh(Mesh *mesh) {
     m_meshes.push_back(mesh);
-    m_meshOffset.push_back(m_meshOffset.back() + mesh->getTriangleCount());
+    uint32_t last_triangle = m_meshOffset.back();
+    for(uint32_t triangle=last_triangle; triangle<last_triangle+mesh->getTriangleCount(); ++triangle) {
+      m_triangles.push_back(triangle);
+    }
+    m_meshOffset.push_back(last_triangle + mesh->getTriangleCount());
     m_bbox.expandBy(mesh->getBoundingBox());
 }
 
@@ -49,6 +116,7 @@ void Accel::clear() {
     m_bbox.reset();
     m_meshes.shrink_to_fit();
     m_meshOffset.shrink_to_fit();
+    delete m_octree;
 }
 
 void Accel::activate() {
@@ -62,7 +130,7 @@ void Accel::activate() {
     Timer timer;
 
     {
-      //todo fill in this part
+      m_octree = build(m_bbox, m_triangles); 
     }
     cout << "done (took " << timer.elapsedString() << ")." << endl;
 
@@ -83,7 +151,24 @@ bool Accel::rayIntersect(Ray3f &_ray, Intersection &its, bool shadowRay) const {
     uint32_t f = 0;
 
     {
-    //! todo: fill in this part
+      //! todo (Part 2): replace this search with the Octree traversal
+      /* Brute force search through all triangles */
+      for (auto idx : m_triangles) {
+        uint32_t local_idx = idx;
+        auto mesh = getMesh(findMesh(local_idx));
+        float u, v, t;
+        if (mesh->rayIntersect(idx, ray, u, v, t)) {
+          /* An intersection was found! Can terminate
+             immediately if this is a shadow ray query */
+          if (shadowRay)
+            return true;
+          hitmesh = mesh;
+          ray.maxt = its.t = t;
+          its.uv = Point2f(u, v);
+          f = idx;
+          foundIntersection = true;
+        }
+      }
     }
 
     if (foundIntersection) {
@@ -130,6 +215,7 @@ bool Accel::rayIntersect(Ray3f &_ray, Intersection &its, bool shadowRay) const {
             its.shFrame = its.geoFrame;
         }
 
+        its.bsdf = hitmesh->getBSDF();
         if(hitmesh->isEmitter()) {
             its.emitter=hitmesh->getEmitter();
     }
@@ -147,7 +233,7 @@ std::string Accel::toString() const {
         meshes += "\n";
     }
     return tfm::format(
-        "BBOX accel[\n"
+        "Octree accel[\n"
         "  meshes = {\n"
         "  %s  }\n"
         "]",

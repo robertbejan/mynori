@@ -18,15 +18,20 @@
 
 #pragma once
 
+#include <vector>
 #include <nori/mesh.h>
 #include <nori/shape.h>
+#include <utility>
 
 NORI_NAMESPACE_BEGIN
+
+struct OctreeNode;
+using Triangle = uint32_t;
 
 class Accel : public Shape{
 public:
     /// Create a new and empty BVH
-    Accel() {m_meshOffset.push_back(0u);}
+    Accel(): m_octree(nullptr) {m_meshOffset.push_back(0u);}
 
     /// Release all resources
     virtual ~Accel() { clear(); };
@@ -105,11 +110,16 @@ protected:
         return m_meshes[meshIdx]->getCentroid(index);
     }
 
+protected:
+    using Triangles = std::vector<Triangle>;
+    OctreeNode* build(const BoundingBox3f& bbox, const Triangles & triangles);
 
 private:
     std::vector<Mesh *> m_meshes;       ///< List of meshes 
     std::vector<uint32_t> m_meshOffset; ///< Index of the first triangle for each shape
+    Triangles m_triangles; ///< Index of the first triangle for each shape
     BoundingBox3f m_bbox;               ///< Bounding box of the entire BVH
+    OctreeNode* m_octree;
 };
 
 NORI_NAMESPACE_END
