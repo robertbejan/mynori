@@ -22,6 +22,7 @@
 #include <Eigen/Geometry>
 #include <atomic>
 #include <stack>
+#include <set>
 
 /*
  * =======================================================================
@@ -123,16 +124,24 @@ void Accel::activate() {
     uint32_t size  = getTriangleCount();
     if (size == 0)
         return;
-    cout << "Constructing a SAH BVH (" << m_meshes.size()
+    cout << "Constructing an Octree (" << m_meshes.size()
         << (m_meshes.size() == 1 ? " mesh, " : " meshes, ")
         << size << " triangles) .. ";
     cout.flush();
     Timer timer;
 
+    m_octree = build(m_bbox, m_triangles); 
+    std::set<Triangle> all_triangles;
     {
-      m_octree = build(m_bbox, m_triangles); 
+      //! todo (Part 1 test): store all the triangles of the octree in a std::set
     }
     cout << "done (took " << timer.elapsedString() << ")." << endl;
+    if (all_triangles.size() == m_triangles.size()) {
+      cout << "All triangles in the octree [OK]" << endl;
+    }
+    else {
+      cout << "All triangles in the octree [FAILED]" << endl;
+    }
 
 }
 
