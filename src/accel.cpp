@@ -60,6 +60,7 @@ public:
   BoundingBox3f bbox;
   static const uint32_t triangles_per_leaf = 10;
   NodePtr children[8] = {nullptr};
+  bool m_useOctree = false; // Change this to set to Brute Force or Octree
 };
 
 struct OctreeLeaf : public OctreeNode {
@@ -91,10 +92,51 @@ public:
 };
 
 
+std::vector<BoundingBox3f> subdivideBoundingBox(const BoundingBox3f &box) {
+    std::vector<BoundingBox3f> children(8);
+    Point3f min = box.min;
+    Point3f max = box.max;
+    Point3f center = box.getCenter();
+
+    // Define the 8 sub-boxes (octants)
+    // Each child box is defined by min/max corners based on center splits
+    children[0] = BoundingBox3f{min, center};
+    children[1] = BoundingBox3f{Point3f(center.x(), min.y(), min.z()), Point3f(max.x(), center.y(), center.z())};
+    children[2] = BoundingBox3f{Point3f(min.x(), center.y(), min.z()), Point3f(center.x(), max.y(), center.z())};
+    children[3] = BoundingBox3f{Point3f(center.x(), center.y(), min.z()), Point3f(max.x(), max.y(), center.z())};
+    children[4] = BoundingBox3f{Point3f(min.x(), min.y(), center.z()), Point3f(center.x(), center.y(), max.z())};
+    children[5] = BoundingBox3f{Point3f(center.x(), min.y(), center.z()), Point3f(max.x(), center.y(), max.z())};
+    children[6] = BoundingBox3f{Point3f(min.x(), center.y(), center.z()), Point3f(center.x(), max.y(), max.z())};
+    children[7] = BoundingBox3f{center, max};
+
+    return children;
+}
+
 OctreeNode*
 Accel::build(const BoundingBox3f& bbox, const Triangles & triangles){
-  //todo (Part 1): fill in this part to construct the Octree
-  return nullptr;
+  if (triangles.size() < OctreeNode::triangles_per_leaf)
+  {
+    return new OctreeLeaf(bbox,triangles);
+  }
+
+  Triangles triangle_list[8];
+  std::vector<BoundingBox3f> childrenBoxes = subdivideBoundingBox(bbox);
+  for (auto idx : triangles) {
+    BoundingBox3f tri_bbox = getBoundingBox(idx);
+    for (int i = 0; i < 8; ++i) {
+      if (tri_bbox.overlaps(childrenBoxes[i])) {
+        triangle_list[i].push_back(idx);
+        //! beware infinite recursion if "list[i]==triangles"
+        if (triangle_list[i].size() == triangles.size())
+          return new OctreeLeaf(bbox,triangles);
+      }
+    }
+  }
+
+  OctreeNode *node = new OctreeNode(bbox);
+  for (int i = 0; i < 8; ++i)
+    node->children[i] = build(childrenBoxes[i], triangle_list[i]);
+  return node;
 }
 
 
@@ -119,6 +161,23 @@ void Accel::clear() {
     m_meshOffset.shrink_to_fit();
     delete m_octree;
 }
+void collectTriangles(const OctreeNode* node, std::set<Triangle>& all_triangles) {
+    if (!node)
+        return;
+
+    if (node->is_leaf()) {
+        const Triangle* tris = node->getTriangles();
+        unsigned int count = node->nbTriangles();
+        for (unsigned int i = 0; i < count; ++i) {
+            all_triangles.insert(tris[i]);
+        }
+    } else {
+        for (int i = 0; i < 8; ++i) {
+            collectTriangles(node->children[i], all_triangles);
+        }
+    }
+}
+
 
 void Accel::activate() {
     uint32_t size  = getTriangleCount();
@@ -133,7 +192,7 @@ void Accel::activate() {
     m_octree = build(m_bbox, m_triangles); 
     std::set<Triangle> all_triangles;
     {
-      //! todo (Part 1 test): store all the triangles of the octree in a std::set
+      collectTriangles(m_octree, all_triangles);
     }
     cout << "done (took " << timer.elapsedString() << ")." << endl;
     if (all_triangles.size() == m_triangles.size()) {
@@ -147,11 +206,10 @@ void Accel::activate() {
 
 bool Accel::rayIntersect(Ray3f &_ray, Intersection &its, bool shadowRay) const {
 
-    /* Use an adaptive ray epsilon */
+    /* Use an adaptive ray epsilon and check maxt/mint as before */
     Ray3f ray(_ray);
     if (ray.mint == Epsilon)
         ray.mint = std::max(ray.mint, ray.mint * ray.o.array().abs().maxCoeff());
-
     if (ray.maxt < ray.mint)
         return false;
 
@@ -159,67 +217,123 @@ bool Accel::rayIntersect(Ray3f &_ray, Intersection &its, bool shadowRay) const {
     const Mesh *hitmesh   = nullptr;
     uint32_t f = 0;
 
-    {
-      //! todo (Part 2): replace this search with the Octree traversal
-      /* Brute force search through all triangles */
-      for (auto idx : m_triangles) {
-        uint32_t local_idx = idx;
-        auto mesh = getMesh(findMesh(local_idx));
-        float u, v, t;
-        if (mesh->rayIntersect(idx, ray, u, v, t)) {
-          /* An intersection was found! Can terminate
-             immediately if this is a shadow ray query */
-          if (shadowRay)
-            return true;
-          hitmesh = mesh;
-          ray.maxt = its.t = t;
-          its.uv = Point2f(u, v);
-          f = idx;
-          foundIntersection = true;
+    // 💡 CHOICE MECHANISM: Check the flag to choose the method
+    if (m_useOctree && m_octree) {
+        // --- OCTREE TRAVERSAL (Accelerated) ---
+        
+        // Stack for octree traversal
+        std::stack<const OctreeNode*> stack;
+        stack.push(m_octree);
+
+        // Current closest intersection
+        float closest_t = ray.maxt;
+        foundIntersection = false;
+
+        while (!stack.empty()) {
+            const OctreeNode* node = stack.top();
+            stack.pop();
+
+            if (!node)
+                continue;
+
+            float tnear, tfar;
+            // Skip nodes that the ray does not intersect or are farther than current hit
+            if (!node->bbox.rayIntersect(ray, tnear, tfar) || tnear > closest_t)
+                continue;
+
+            if (node->is_leaf()) {
+                // Test intersection with all triangles in the leaf node
+                const Triangle* tris = node->getTriangles();
+                unsigned int count = node->nbTriangles();
+
+                for (unsigned int i = 0; i < count; ++i) {
+                    uint32_t idx = tris[i];
+                    uint32_t local_idx = idx;
+                    auto mesh = getMesh(findMesh(local_idx));
+
+                    float u, v, t;
+                    if (mesh->rayIntersect(idx, ray, u, v, t)) {
+                        if (shadowRay)
+                            return true;
+
+                        // Update closest intersection
+                        if (t < closest_t) {
+                            closest_t = t;
+                            ray.maxt = its.t = t;
+                            its.uv = Point2f(u, v);
+                            f = idx;
+                            hitmesh = mesh;
+                            foundIntersection = true;
+                        }
+                    }
+                }
+            } else {
+                // Collect child nodes that the ray intersects, along with their entry distances
+                struct ChildHit {
+                    const OctreeNode* node;
+                    float tnear;
+                };
+                std::vector<ChildHit> hitChildren;
+
+                for (int i = 0; i < 8; ++i) {
+                    const OctreeNode* child = node->children[i];
+                    if (!child)
+                        continue;
+
+                    float cn, cf;
+                    if (child->bbox.rayIntersect(ray, cn, cf) && cn <= closest_t)
+                        hitChildren.push_back({child, cn});
+                }
+
+                // Sort children by distance (front-to-back)
+                std::sort(hitChildren.begin(), hitChildren.end(),
+                    [](const ChildHit& a, const ChildHit& b) {
+                        return a.tnear < b.tnear;
+                    });
+
+                // Push them in reverse order so the closest child is processed next
+                for (auto it = hitChildren.rbegin(); it != hitChildren.rend(); ++it)
+                    stack.push(it->node);
+            }
         }
-      }
+    } else {
+       
+        /* Brute force search through all triangles */
+        for (auto idx : m_triangles) {
+          uint32_t local_idx = idx;
+          auto mesh = getMesh(findMesh(local_idx));
+          float u, v, t;
+          if (mesh->rayIntersect(idx, ray, u, v, t)) {
+            /* An intersection was found! Can terminate
+               immediately if this is a shadow ray query */
+            if (shadowRay)
+              return true;
+            hitmesh = mesh;
+            ray.maxt = its.t = t;
+            its.uv = Point2f(u, v);
+            f = idx;
+            foundIntersection = true;
+          }
+        }
     }
 
     if (foundIntersection) {
-        /* Find the barycentric coordinates */
+
         Vector3f bary;
         bary << 1-its.uv.sum(), its.uv;
-
-        /* References to all relevant mesh buffers */
         const MatrixXf &V  = hitmesh->getVertexPositions();
         const MatrixXf &N  = hitmesh->getVertexNormals();
         const MatrixXf &UV = hitmesh->getVertexTexCoords();
         const MatrixXu &F  = hitmesh->getIndices();
-
-        /* Vertex indices of the triangle */
         uint32_t idx0 = F(0, f), idx1 = F(1, f), idx2 = F(2, f);
-
         Point3f p0 = V.col(idx0), p1 = V.col(idx1), p2 = V.col(idx2);
-
-        /* Compute the intersection positon accurately
-           using barycentric coordinates */
         its.p = bary.x() * p0 + bary.y() * p1 + bary.z() * p2;
-
-        /* Compute proper texture coordinates if provided by the mesh */
         if (UV.size() > 0)
-            its.uv = bary.x() * UV.col(idx0) +
-                bary.y() * UV.col(idx1) +
-                bary.z() * UV.col(idx2);
-
-        /* Compute the geometry frame */
+            its.uv = bary.x() * UV.col(idx0) + bary.y() * UV.col(idx1) + bary.z() * UV.col(idx2);
         its.geoFrame = Frame((p1-p0).cross(p2-p0).normalized());
-
         if (N.size() > 0) {
-            /* Compute the shading frame. Note that for simplicity,
-               the current implementation doesn't attempt to provide
-               tangents that are continuous across the surface. That
-               means that this code will need to be modified to be able
-               use anisotropic BRDFs, which need tangent continuity */
-
             its.shFrame = Frame(
-                (bary.x() * N.col(idx0) +
-                 bary.y() * N.col(idx1) +
-                 bary.z() * N.col(idx2)).normalized());
+                (bary.x() * N.col(idx0) + bary.y() * N.col(idx1) + bary.z() * N.col(idx2)).normalized());
         } else {
             its.shFrame = its.geoFrame;
         }
@@ -227,7 +341,7 @@ bool Accel::rayIntersect(Ray3f &_ray, Intersection &its, bool shadowRay) const {
         its.bsdf = hitmesh->getBSDF();
         if(hitmesh->isEmitter()) {
             its.emitter=hitmesh->getEmitter();
-    }
+        }
     }
 
     return foundIntersection;

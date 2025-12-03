@@ -120,6 +120,8 @@ private:
     Triangles m_triangles; ///< Index of the first triangle for each shape
     BoundingBox3f m_bbox;               ///< Bounding box of the entire BVH
     OctreeNode* m_octree;
+    bool m_useOctree = false; // Change this to set to Brute Force or Octree
+
 };
 
 NORI_NAMESPACE_END
