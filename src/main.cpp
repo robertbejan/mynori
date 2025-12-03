@@ -80,8 +80,11 @@ static void render(Scene *scene, const std::string &filename) {
     result.clear();
 
     /* Create a window that visualizes the partially rendered result */
-    nanogui::init();
-    NoriScreen *screen = new NoriScreen(result);
+    NoriScreen *screen;
+    if (use_gui) {
+      nanogui::init();
+      screen = new NoriScreen(result);
+    }
 
     /* Do the following in parallel and asynchronously */
     std::thread render_thread([&] {
@@ -170,6 +173,7 @@ int main(int argc, char **argv) {
     for (int i = 1; i < argc; ++i) {
         std::string token(argv[i]);
         if (token == "-n" || token == "--no-gui") {
+          std::cout << "NO GUI" << std::endl;
             use_gui = false;
         } else if (token == "-t" || token == "--threads") {
             if (i+1 >= argc) {
